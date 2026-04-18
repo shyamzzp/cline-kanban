@@ -31,28 +31,33 @@ vi.mock("@hello-pangea/dnd", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => mockWorkspaceSnapshot,
+	useHomeRepositoryUrlValue: () => "https://github.com/acme/kanban.git",
 }));
 
-vi.mock("@/utils/react-use", () => ({
-	useMeasure: () => {
-		mockMeasureCallCount += 1;
-		const width = mockMeasureWidths[(mockMeasureCallCount - 1) % mockMeasureWidths.length] ?? 240;
-		return [
-			() => {},
-			{
-				width,
-				height: 0,
-				top: 0,
-				left: 0,
-				bottom: 0,
-				right: 0,
-				x: 0,
-				y: 0,
-				toJSON: () => ({}),
-			},
-		];
-	},
-}));
+vi.mock("@/utils/react-use", async () => {
+	const actual = await vi.importActual<typeof import("@/utils/react-use")>("@/utils/react-use");
+	return {
+		...actual,
+		useMeasure: () => {
+			mockMeasureCallCount += 1;
+			const width = mockMeasureWidths[(mockMeasureCallCount - 1) % mockMeasureWidths.length] ?? 240;
+			return [
+				() => {},
+				{
+					width,
+					height: 0,
+					top: 0,
+					left: 0,
+					bottom: 0,
+					right: 0,
+					x: 0,
+					y: 0,
+					toJSON: () => ({}),
+				},
+			];
+		},
+	};
+});
 
 vi.mock("@/utils/text-measure", () => ({
 	DEFAULT_TEXT_MEASURE_FONT: "400 14px sans-serif",
@@ -167,6 +172,8 @@ describe("BoardCard", () => {
 		act(() => {
 			root.unmount();
 		});
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
 		container.remove();
 		if (previousActEnvironment === undefined) {
@@ -299,6 +306,77 @@ describe("BoardCard", () => {
 
 		expect(container.textContent).toContain("Read(src/index.ts)");
 		expect(container.textContent).not.toContain("Using Read");
+	});
+
+	it("shows a GitHub release label on trash cards when hook metadata includes a release URL", async () => {
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard()}
+						index={0}
+						columnId="trash"
+						sessionSummary={createSummary("awaiting_review", {
+							latestHookActivity: {
+								activityText: null,
+								toolName: null,
+								toolInputSummary: null,
+								finalMessage: "Published release: https://github.com/acme/kanban/releases/tag/v1.2.3",
+								hookEventName: "task_complete",
+								notificationType: null,
+								source: "cline-sdk",
+							},
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		const releaseLabel = container.querySelector('a[href="https://github.com/acme/kanban/releases/tag/v1.2.3"]');
+		expect(releaseLabel).toBeInstanceOf(HTMLAnchorElement);
+		expect(releaseLabel?.textContent).toBe("GitHub Release");
+	});
+
+	it("verifies and shows a GitHub release label from a version hint", async () => {
+		const fetchMock = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ html_url: "https://github.com/acme/kanban/releases/tag/v1.0.1" }),
+		}));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await act(async () => {
+			root.render(
+				<TooltipProvider>
+					<BoardCard
+						card={createCard({
+							prompt: "After cleanup, bump application version to 1.0.1 and sync release notes",
+						})}
+						index={0}
+						columnId="trash"
+						sessionSummary={createSummary("awaiting_review", {
+							latestHookActivity: {
+								activityText: "Implemented version bump to 1.0.1 across metadata",
+								toolName: null,
+								toolInputSummary: null,
+								finalMessage: null,
+								hookEventName: "task_complete",
+								notificationType: null,
+								source: "cline-sdk",
+							},
+						})}
+					/>
+				</TooltipProvider>,
+			);
+		});
+
+		await act(async () => {
+			await Promise.resolve();
+		});
+
+		expect(fetchMock).toHaveBeenCalled();
+		const releaseLabel = container.querySelector('a[href="https://github.com/acme/kanban/releases/tag/v1.0.1"]');
+		expect(releaseLabel).toBeInstanceOf(HTMLAnchorElement);
+		expect(releaseLabel?.textContent).toBe("GitHub Release");
 	});
 
 	it("shows non-cline tool activity in the compact tool label format", async () => {
@@ -574,5 +652,112 @@ describe("BoardCard", () => {
 
 		expect(container.textContent).toContain("checking the next file");
 		expect(container.textContent).not.toContain("Agent:");
+	});
+
+	it("updates the elapsed timer on running cards", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-04-08T10:00:00.000Z"));
+
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createSummary("running", {
+						startedAt: Date.now() - 65_000,
+						updatedAt: Date.now(),
+					})}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("01:05");
+
+		await act(async () => {
+			vi.advanceTimersByTime(1_000);
+		});
+
+		expect(container.textContent).toContain("01:06");
+	});
+
+	it("shows a blinking indicator when the card is waiting for user approval", async () => {
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createSummary("running", {
+						latestHookActivity: {
+							activityText: "Waiting for approval",
+							toolName: null,
+							toolInputSummary: null,
+							finalMessage: null,
+							hookEventName: "approval_request",
+							notificationType: null,
+							source: "codex",
+						},
+					})}
+				/>,
+			);
+		});
+
+		const blinker = container.querySelector(".kb-board-card-input-blinker");
+		expect(blinker).toBeTruthy();
+		expect(blinker?.getAttribute("title")).toBe("Waiting for user input");
+	});
+
+	it("does not show the approval blinker for normal running cards", async () => {
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="in_progress"
+					sessionSummary={createSummary("running", {
+						latestHookActivity: {
+							activityText: "Agent active",
+							toolName: null,
+							toolInputSummary: null,
+							finalMessage: null,
+							hookEventName: "assistant_delta",
+							notificationType: null,
+							source: "codex",
+						},
+					})}
+				/>,
+			);
+		});
+
+		expect(container.querySelector(".kb-board-card-input-blinker")).toBeNull();
+	});
+
+	it("shows a frozen elapsed timer for review cards", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-04-08T10:00:00.000Z"));
+
+		await act(async () => {
+			root.render(
+				<BoardCard
+					card={createCard()}
+					index={0}
+					columnId="review"
+					sessionSummary={createSummary("awaiting_review", {
+						startedAt: Date.now() - 125_000,
+						updatedAt: Date.now() - 5_000,
+					})}
+				/>,
+			);
+		});
+
+		expect(container.textContent).toContain("02:00");
+
+		await act(async () => {
+			vi.advanceTimersByTime(10_000);
+		});
+
+		expect(container.textContent).toContain("02:00");
+		expect(container.textContent).not.toContain("02:10");
 	});
 });

@@ -190,4 +190,39 @@ describe("ProjectNavigationPanel width persistence", () => {
 		expect(container.textContent).toContain("Send feedback");
 		expect(container.textContent).not.toContain("Report issue");
 	});
+
+	it("highlights project row and shows labels when tasks are running and waiting for input", () => {
+		renderPanel({
+			currentProjectId: null,
+			projectActivityById: {
+				"project-1": {
+					hasRunningTask: true,
+					hasInputRequest: true,
+				},
+			},
+		});
+		const projectRow = container.querySelector(".kb-project-row");
+		expect(projectRow).toBeTruthy();
+		expect(projectRow?.getAttribute("data-has-running-task")).toBe("true");
+		expect(projectRow?.getAttribute("data-has-input-request")).toBe("true");
+		expect(container.textContent).toContain("Running");
+		expect(container.textContent).toContain("Needs input");
+	});
+
+	it("marks collapsed project button with running/input attributes", () => {
+		localStorage.setItem(LocalStorageKey.ProjectNavigationPanelCollapsed, "true");
+		renderPanel({
+			currentProjectId: null,
+			projectActivityById: {
+				"project-1": {
+					hasRunningTask: true,
+					hasInputRequest: true,
+				},
+			},
+		});
+		const projectButton = container.querySelector('button[title="Kanban"]');
+		expect(projectButton).toBeTruthy();
+		expect(projectButton?.getAttribute("data-has-running-task")).toBe("true");
+		expect(projectButton?.getAttribute("data-has-input-request")).toBe("true");
+	});
 });

@@ -2,6 +2,7 @@
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 import type {
+	RuntimeTaskActivityLogEntry,
 	RuntimeTaskHookActivity,
 	RuntimeTaskImage,
 	RuntimeTaskSessionReviewReason,
@@ -37,6 +38,7 @@ import { TerminalStateMirror } from "./terminal-state-mirror";
 const MAX_WORKSPACE_TRUST_BUFFER_CHARS = 16_384;
 const AUTO_RESTART_WINDOW_MS = 5_000;
 const MAX_AUTO_RESTARTS_PER_WINDOW = 3;
+const MAX_ACTIVITY_LOG_ENTRIES = 100;
 // TUI apps (Codex, OpenCode) can query OSC 10/11 before the browser terminal is attached
 // and ready to answer. We intercept those startup probes during early PTY output, synthesize
 // foreground/background color replies, then disable the filter once a live terminal listener
@@ -120,6 +122,7 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 		exitCode: null,
 		lastHookAt: null,
 		latestHookActivity: null,
+		activityLog: [],
 		warningMessage: null,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
@@ -129,7 +132,32 @@ function createDefaultSummary(taskId: string): RuntimeTaskSessionSummary {
 function cloneSummary(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSummary {
 	return {
 		...summary,
+		activityLog: summary.activityLog ? [...summary.activityLog] : [],
 	};
+}
+
+function inferActivityStatus(activity: RuntimeTaskHookActivity): RuntimeTaskActivityLogEntry["status"] {
+	const text = activity.activityText?.toLowerCase() ?? "";
+	const notificationType = activity.notificationType?.toLowerCase() ?? "";
+	if (text.startsWith("failed") || notificationType.includes("error")) {
+		return "error";
+	}
+	if (text.startsWith("completed") || text.startsWith("final:") || text.startsWith("waiting for review")) {
+		return "success";
+	}
+	return "info";
+}
+
+function resolveActivityLogText(activity: RuntimeTaskHookActivity): string | null {
+	const finalMessage = activity.finalMessage?.trim() ?? "";
+	if (finalMessage.length > 0) {
+		return finalMessage;
+	}
+	const activityText = activity.activityText?.trim() ?? "";
+	if (activityText.length > 0) {
+		return activityText;
+	}
+	return null;
 }
 
 function updateSummary(entry: SessionEntry, patch: Partial<RuntimeTaskSessionSummary>): RuntimeTaskSessionSummary {
@@ -183,13 +211,20 @@ function formatShellSpawnFailure(binary: string, error: unknown): string {
 function buildTerminalEnvironment(
 	...sources: Array<Record<string, string | undefined> | undefined>
 ): Record<string, string | undefined> {
-	return {
+	const merged = {
 		...process.env,
 		...Object.assign({}, ...sources),
 		COLORTERM: "truecolor",
 		TERM: "xterm-256color",
 		TERM_PROGRAM: "kanban",
+		CLICOLOR: "1",
+		CLICOLOR_FORCE: "1",
+		FORCE_COLOR: "1",
 	};
+	// Many developer environments export NO_COLOR globally; clear it for PTY
+	// sessions so ANSI-capable CLIs can emit color inside Kanban terminals.
+	delete merged.NO_COLOR;
+	return merged;
 }
 
 function hasCodexInteractivePrompt(text: string): boolean {
@@ -863,6 +898,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const summary = updateSummary(entry, {
 			lastHookAt: now(),
 			latestHookActivity: next,
+			activityLog: (() => {
+				const message = resolveActivityLogText(next);
+				if (!message) {
+					return entry.summary.activityLog ?? [];
+				}
+				const logEntry: RuntimeTaskActivityLogEntry = {
+					id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+					at: Date.now(),
+					text: message,
+					status: inferActivityStatus(next),
+				};
+				const existing = entry.summary.activityLog ?? [];
+				const nextLog = [...existing, logEntry];
+				return nextLog.length > MAX_ACTIVITY_LOG_ENTRIES
+					? nextLog.slice(nextLog.length - MAX_ACTIVITY_LOG_ENTRIES)
+					: nextLog;
+			})(),
 		});
 		if (entry.active) {
 			for (const listener of entry.listeners.values()) {

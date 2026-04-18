@@ -45,6 +45,24 @@ kanban
 ```
 Run this from the root of any git repo. Kanban will detect your installed CLI agent and launch a local running webserver in your browser. No account or setup required, it works right out of the box.
 
+### Run This Repo Locally (Portable Scripts)
+Use these scripts when developing `cline-kanban` itself. They work even if you launch them from outside the repo because they resolve paths from the script location.
+
+```bash
+# From anywhere
+/absolute/path/to/cline-kanban/scripts/install-local.sh
+/absolute/path/to/cline-kanban/scripts/run-local.sh
+```
+
+Equivalent npm commands (run from repo root):
+
+```bash
+npm run install:local
+npm run dev:local
+```
+
+`install-local.sh` installs root + `web-ui` dependencies and builds `web-ui/dist` so manifest/module assets are served correctly.
+
 ### 2. Create tasks
 Create a task card manually, or open the sidebar chat and ask your agent to break work down into tasks for you. Kanban injects board-management instructions into that session so you can simply ask it to add tasks, link tasks, or start work on your board.
 

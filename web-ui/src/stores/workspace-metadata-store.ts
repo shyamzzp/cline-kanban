@@ -14,6 +14,7 @@ type TaskMetadataListener = (taskId: string) => void;
 interface WorkspaceMetadataState {
 	homeGitSummary: RuntimeGitSyncSummary | null;
 	homeGitStateVersion: number;
+	homeRepositoryUrl: string | null;
 	taskWorkspaceInfoByTaskId: Record<string, RuntimeTaskWorkspaceInfoResponse | null>;
 	taskWorkspaceSnapshotByTaskId: Record<string, ReviewTaskWorkspaceSnapshot | null>;
 	taskWorkspaceStateVersionByTaskId: Record<string, number>;
@@ -22,6 +23,7 @@ interface WorkspaceMetadataState {
 const workspaceMetadataState: WorkspaceMetadataState = {
 	homeGitSummary: null,
 	homeGitStateVersion: 0,
+	homeRepositoryUrl: null,
 	taskWorkspaceInfoByTaskId: {},
 	taskWorkspaceSnapshotByTaskId: {},
 	taskWorkspaceStateVersionByTaskId: {},
@@ -65,12 +67,18 @@ function toTaskWorkspaceSnapshot(metadata: RuntimeTaskWorkspaceMetadata): Review
 	return {
 		taskId: metadata.taskId,
 		path: metadata.path,
+		baseRef: metadata.baseRef,
 		branch: metadata.branch,
 		isDetached: metadata.isDetached,
 		headCommit: metadata.headCommit,
 		changedFiles: metadata.changedFiles,
 		additions: metadata.additions,
 		deletions: metadata.deletions,
+		upstreamBranch: metadata.upstreamBranch ?? null,
+		aheadCount: metadata.aheadCount ?? null,
+		behindCount: metadata.behindCount ?? null,
+		isMergedIntoBaseBranch: metadata.isMergedIntoBaseBranch ?? null,
+		isMergedIntoRemoteBaseBranch: metadata.isMergedIntoRemoteBaseBranch ?? null,
 	};
 }
 
@@ -142,12 +150,18 @@ function areTaskWorkspaceSnapshotsEqual(
 	return (
 		a.taskId === b.taskId &&
 		a.path === b.path &&
+		(a.baseRef ?? null) === (b.baseRef ?? null) &&
 		a.branch === b.branch &&
 		a.isDetached === b.isDetached &&
 		a.headCommit === b.headCommit &&
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
-		a.deletions === b.deletions
+		a.deletions === b.deletions &&
+		(a.upstreamBranch ?? null) === (b.upstreamBranch ?? null) &&
+		(a.aheadCount ?? null) === (b.aheadCount ?? null) &&
+		(a.behindCount ?? null) === (b.behindCount ?? null) &&
+		(a.isMergedIntoBaseBranch ?? null) === (b.isMergedIntoBaseBranch ?? null) &&
+		(a.isMergedIntoRemoteBaseBranch ?? null) === (b.isMergedIntoRemoteBaseBranch ?? null)
 	);
 }
 
@@ -297,6 +311,7 @@ export function resetWorkspaceMetadataStore(): void {
 	]);
 	workspaceMetadataState.homeGitSummary = null;
 	workspaceMetadataState.homeGitStateVersion = 0;
+	workspaceMetadataState.homeRepositoryUrl = null;
 	workspaceMetadataState.taskWorkspaceInfoByTaskId = {};
 	workspaceMetadataState.taskWorkspaceSnapshotByTaskId = {};
 	workspaceMetadataState.taskWorkspaceStateVersionByTaskId = {};
@@ -308,6 +323,11 @@ export function resetWorkspaceMetadataStore(): void {
 
 export function replaceWorkspaceMetadata(metadata: RuntimeWorkspaceMetadata | null): void {
 	setHomeGitMetadata(metadata?.homeGitSummary ?? null, metadata?.homeGitStateVersion ?? 0);
+	const nextHomeRepositoryUrl = metadata?.homeRepositoryUrl ?? null;
+	if (workspaceMetadataState.homeRepositoryUrl !== nextHomeRepositoryUrl) {
+		workspaceMetadataState.homeRepositoryUrl = nextHomeRepositoryUrl;
+		emitHomeGitSummary();
+	}
 
 	const nextTaskWorkspaceInfoByTaskId: Record<string, RuntimeTaskWorkspaceInfoResponse | null> = {};
 	const nextTaskWorkspaceSnapshotByTaskId: Record<string, ReviewTaskWorkspaceSnapshot | null> = {};
@@ -384,6 +404,19 @@ export function useHomeGitStateVersionValue(): number {
 		},
 		() => workspaceMetadataState.homeGitStateVersion,
 		() => 0,
+	);
+}
+
+export function useHomeRepositoryUrlValue(): string | null {
+	return useSyncExternalStore(
+		(listener) => {
+			homeGitSummaryListeners.add(listener);
+			return () => {
+				homeGitSummaryListeners.delete(listener);
+			};
+		},
+		() => workspaceMetadataState.homeRepositoryUrl,
+		() => null,
 	);
 }
 

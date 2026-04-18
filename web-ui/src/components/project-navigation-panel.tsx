@@ -39,6 +39,11 @@ interface TaskCountBadge {
 	count: number;
 }
 
+interface ProjectActivitySummary {
+	hasRunningTask: boolean;
+	hasInputRequest: boolean;
+}
+
 export function ProjectNavigationPanel({
 	projects,
 	isLoadingProjects = false,
@@ -51,6 +56,7 @@ export function ProjectNavigationPanel({
 	selectedAgentId,
 	clineProviderSettings,
 	featurebaseFeedbackState,
+	projectActivityById,
 	onSelectProject,
 	onRemoveProject,
 	onAddProject,
@@ -66,6 +72,7 @@ export function ProjectNavigationPanel({
 	selectedAgentId?: RuntimeAgentId | null;
 	clineProviderSettings?: RuntimeClineProviderSettings | null;
 	featurebaseFeedbackState?: FeaturebaseFeedbackState;
+	projectActivityById?: Record<string, ProjectActivitySummary>;
 	onSelectProject: (projectId: string) => void;
 	onRemoveProject: (projectId: string) => Promise<boolean>;
 	onAddProject: () => void;
@@ -177,17 +184,24 @@ export function ProjectNavigationPanel({
 				{sortedProjects.map((project) => {
 					const isCurrent = currentProjectId === project.id;
 					const letter = project.name.charAt(0).toUpperCase();
+					const activity = projectActivityById?.[project.id];
+					const hasInputRequest = activity?.hasInputRequest ?? false;
+					const hasRunningTask = activity?.hasRunningTask ?? project.taskCounts.in_progress > 0;
 					return (
 						<button
 							key={project.id}
 							type="button"
 							title={project.name}
 							onClick={() => onSelectProject(project.id)}
+							data-has-running-task={hasRunningTask ? "true" : "false"}
+							data-has-input-request={hasInputRequest ? "true" : "false"}
 							className={cn(
 								"w-8 h-8 rounded-md text-xs font-semibold shrink-0 border-0 cursor-pointer flex items-center justify-center",
 								isCurrent
 									? "bg-accent text-white"
 									: "bg-surface-3 text-text-secondary hover:text-text-primary hover:bg-surface-4",
+								!isCurrent && hasRunningTask && "ring-1 ring-inset ring-status-blue/35",
+								!isCurrent && hasInputRequest && "bg-status-gold/15 text-status-gold ring-status-gold/45",
 							)}
 						>
 							{letter}
@@ -288,6 +302,7 @@ export function ProjectNavigationPanel({
 								key={project.id}
 								project={project}
 								isCurrent={currentProjectId === project.id}
+								activity={projectActivityById?.[project.id]}
 								removingProjectId={removingProjectId}
 								onSelect={onSelectProject}
 								onRemove={(projectId) => {
@@ -544,12 +559,14 @@ function ProjectRowSkeleton(): React.ReactElement {
 function ProjectRow({
 	project,
 	isCurrent,
+	activity,
 	removingProjectId,
 	onSelect,
 	onRemove,
 }: {
 	project: RuntimeProjectSummary;
 	isCurrent: boolean;
+	activity?: ProjectActivitySummary;
 	removingProjectId: string | null;
 	onSelect: (id: string) => void;
 	onRemove: (id: string) => void;
@@ -558,6 +575,8 @@ function ProjectRow({
 	const isRemovingProject = removingProjectId === project.id;
 	const hasAnyProjectRemoval = removingProjectId !== null;
 	const [isMenuOpen, setIsMenuOpen] = useState(false);
+	const hasInputRequest = activity?.hasInputRequest ?? false;
+	const hasRunningTask = activity?.hasRunningTask ?? project.taskCounts.in_progress > 0;
 	const taskCountBadges: TaskCountBadge[] = [
 		{
 			id: "backlog",
@@ -593,6 +612,8 @@ function ProjectRow({
 		<div
 			role="button"
 			tabIndex={0}
+			data-has-running-task={hasRunningTask ? "true" : "false"}
+			data-has-input-request={hasInputRequest ? "true" : "false"}
 			onClick={() => onSelect(project.id)}
 			onKeyDown={(e) => {
 				if (e.key === "Enter" || e.key === " ") {
@@ -600,7 +621,12 @@ function ProjectRow({
 					onSelect(project.id);
 				}
 			}}
-			className={cn("kb-project-row cursor-pointer rounded-md", isCurrent && "kb-project-row-selected")}
+			className={cn(
+				"kb-project-row cursor-pointer rounded-md",
+				isCurrent && "kb-project-row-selected",
+				!isCurrent && hasRunningTask && "bg-status-blue/10 ring-1 ring-inset ring-status-blue/30",
+				!isCurrent && hasInputRequest && "bg-status-gold/10 ring-status-gold/35",
+			)}
 			style={{
 				display: "flex",
 				alignItems: "center",
@@ -625,6 +651,32 @@ function ProjectRow({
 				>
 					{displayPath}
 				</div>
+				{hasRunningTask || hasInputRequest ? (
+					<div className="flex gap-1 mt-1">
+						{hasRunningTask ? (
+							<span
+								className={cn(
+									"inline-flex items-center rounded-full text-[10px] px-1.5 py-px font-medium",
+									isCurrent ? "bg-white/20 text-white" : "bg-status-blue/20 text-status-blue",
+								)}
+								title="Task running in this project"
+							>
+								Running
+							</span>
+						) : null}
+						{hasInputRequest ? (
+							<span
+								className={cn(
+									"inline-flex items-center rounded-full text-[10px] px-1.5 py-px font-medium",
+									isCurrent ? "bg-white/20 text-white" : "bg-status-gold/20 text-status-gold",
+								)}
+								title="Task is waiting for your CLI approval/input"
+							>
+								Needs input
+							</span>
+						) : null}
+					</div>
+				) : null}
 				{taskCountBadges.length > 0 ? (
 					<div className="flex gap-1 mt-1">
 						{taskCountBadges.map((badge) => (

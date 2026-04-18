@@ -78,6 +78,11 @@ import {
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import type { BoardData } from "@/types";
 
+function isSessionAwaitingCliInput(summary: RuntimeTaskSessionSummary): boolean {
+	const activityText = summary.latestHookActivity?.activityText?.trim() ?? "";
+	return activityText.startsWith("Waiting for approval");
+}
+
 export default function App(): ReactElement {
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
@@ -267,6 +272,19 @@ export default function App(): ReactElement {
 		isWorkspaceMetadataPending,
 		hasReceivedSnapshot,
 	});
+	const projectNavigationActivityById = useMemo(() => {
+		const hasRunningSession = Object.values(sessions).some((summary) => summary.state === "running");
+		const hasInputRequest = Object.values(sessions).some(isSessionAwaitingCliInput);
+		const statusByProjectId: Record<string, { hasRunningTask: boolean; hasInputRequest: boolean }> = {};
+		for (const project of displayedProjects) {
+			const isCurrentProject = project.id === currentProjectId;
+			statusByProjectId[project.id] = {
+				hasRunningTask: project.taskCounts.in_progress > 0 || (isCurrentProject && hasRunningSession),
+				hasInputRequest: isCurrentProject && hasInputRequest,
+			};
+		}
+		return statusByProjectId;
+	}, [currentProjectId, displayedProjects, sessions]);
 
 	useReviewReadyNotifications({
 		activeWorkspaceId: activeNotificationWorkspaceId,
@@ -731,6 +749,25 @@ export default function App(): ReactElement {
 			idPrefix={`inline-edit-task-${editingTaskId}`}
 		/>
 	) : undefined;
+	const historyItems = useMemo(() => {
+		const trashColumn = board.columns.find((column) => column.id === "trash");
+		if (!trashColumn) {
+			return [];
+		}
+		return trashColumn.cards.map((card) => {
+			const summary = sessions[card.id];
+			const hasError =
+				summary?.state === "failed" ||
+				summary?.state === "interrupted" ||
+				(summary?.activityLog ?? []).some((entry) => entry.status === "error");
+			return {
+				taskId: card.id,
+				prompt: card.prompt,
+				updatedAt: summary?.updatedAt ?? card.updatedAt,
+				hasError,
+			};
+		});
+	}, [board.columns, sessions]);
 
 	if (isRuntimeDisconnected) {
 		return <RuntimeDisconnectedFallback />;
@@ -755,6 +792,7 @@ export default function App(): ReactElement {
 						selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
 						clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
 						featurebaseFeedbackState={featurebaseFeedbackState}
+						projectActivityById={projectNavigationActivityById}
 						onSelectProject={(projectId) => {
 							void handleSelectProject(projectId);
 						}}
@@ -818,6 +856,7 @@ export default function App(): ReactElement {
 						isOpeningWorkspace={isOpeningWorkspace}
 						onToggleGitHistory={hasNoProjects ? undefined : handleToggleGitHistory}
 						isGitHistoryOpen={isGitHistoryOpen}
+						historyItems={historyItems}
 						hideProjectDependentActions={shouldHideProjectDependentTopBarActions}
 					/>
 					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">

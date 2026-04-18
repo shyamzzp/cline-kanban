@@ -202,6 +202,14 @@ export const runtimeTaskHookActivitySchema = z.object({
 });
 export type RuntimeTaskHookActivity = z.infer<typeof runtimeTaskHookActivitySchema>;
 
+export const runtimeTaskActivityLogEntrySchema = z.object({
+	id: z.string(),
+	at: z.number(),
+	text: z.string(),
+	status: z.enum(["success", "error", "info"]),
+});
+export type RuntimeTaskActivityLogEntry = z.infer<typeof runtimeTaskActivityLogEntrySchema>;
+
 export const runtimeTaskTurnCheckpointSchema = z.object({
 	turn: z.number().int().positive(),
 	ref: z.string(),
@@ -224,6 +232,7 @@ export const runtimeTaskSessionSummarySchema = z.object({
 	exitCode: z.number().nullable(),
 	lastHookAt: z.number().nullable().default(null),
 	latestHookActivity: runtimeTaskHookActivitySchema.nullable().default(null),
+	activityLog: z.array(runtimeTaskActivityLogEntrySchema).optional(),
 	warningMessage: z.string().nullable().optional(),
 	latestTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
 	previousTurnCheckpoint: runtimeTaskTurnCheckpointSchema.nullable().optional(),
@@ -285,6 +294,11 @@ export const runtimeTaskWorkspaceMetadataSchema = z.object({
 	changedFiles: z.number().nullable(),
 	additions: z.number().nullable(),
 	deletions: z.number().nullable(),
+	upstreamBranch: z.string().nullable().optional(),
+	aheadCount: z.number().nullable().optional(),
+	behindCount: z.number().nullable().optional(),
+	isMergedIntoBaseBranch: z.boolean().nullable().optional(),
+	isMergedIntoRemoteBaseBranch: z.boolean().nullable().optional(),
 	stateVersion: z.number().int().nonnegative(),
 });
 export type RuntimeTaskWorkspaceMetadata = z.infer<typeof runtimeTaskWorkspaceMetadataSchema>;
@@ -292,6 +306,7 @@ export type RuntimeTaskWorkspaceMetadata = z.infer<typeof runtimeTaskWorkspaceMe
 export const runtimeWorkspaceMetadataSchema = z.object({
 	homeGitSummary: runtimeGitSyncSummarySchema.nullable(),
 	homeGitStateVersion: z.number().int().nonnegative(),
+	homeRepositoryUrl: z.string().nullable().optional(),
 	taskWorkspaces: z.array(runtimeTaskWorkspaceMetadataSchema),
 });
 export type RuntimeWorkspaceMetadata = z.infer<typeof runtimeWorkspaceMetadataSchema>;

@@ -5,6 +5,7 @@ import type {
 	RuntimeWorkspaceMetadata,
 } from "../core/api-contract";
 import { getGitSyncSummary, probeGitWorkspaceState } from "../workspace/git-sync";
+import { runGit } from "../workspace/git-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 
 const WORKSPACE_METADATA_POLL_INTERVAL_MS = 1_000;
@@ -32,6 +33,7 @@ interface WorkspaceMetadataEntry {
 	pollTimer: NodeJS.Timeout | null;
 	refreshPromise: Promise<RuntimeWorkspaceMetadata> | null;
 	homeGit: CachedHomeGitMetadata;
+	homeRepositoryUrl: string | null;
 	taskMetadataByTaskId: Map<string, CachedTaskWorkspaceMetadata>;
 }
 
@@ -104,6 +106,11 @@ function areTaskMetadataEqual(a: RuntimeTaskWorkspaceMetadata, b: RuntimeTaskWor
 		a.changedFiles === b.changedFiles &&
 		a.additions === b.additions &&
 		a.deletions === b.deletions &&
+		(a.upstreamBranch ?? null) === (b.upstreamBranch ?? null) &&
+		(a.aheadCount ?? null) === (b.aheadCount ?? null) &&
+		(a.behindCount ?? null) === (b.behindCount ?? null) &&
+		(a.isMergedIntoBaseBranch ?? null) === (b.isMergedIntoBaseBranch ?? null) &&
+		(a.isMergedIntoRemoteBaseBranch ?? null) === (b.isMergedIntoRemoteBaseBranch ?? null) &&
 		a.stateVersion === b.stateVersion
 	);
 }
@@ -113,6 +120,9 @@ function areWorkspaceMetadataEqual(a: RuntimeWorkspaceMetadata, b: RuntimeWorksp
 		return false;
 	}
 	if (a.homeGitStateVersion !== b.homeGitStateVersion) {
+		return false;
+	}
+	if ((a.homeRepositoryUrl ?? null) !== (b.homeRepositoryUrl ?? null)) {
 		return false;
 	}
 	if (a.taskWorkspaces.length !== b.taskWorkspaces.length) {
@@ -132,6 +142,7 @@ function createEmptyWorkspaceMetadata(): RuntimeWorkspaceMetadata {
 	return {
 		homeGitSummary: null,
 		homeGitStateVersion: 0,
+		homeRepositoryUrl: null,
 		taskWorkspaces: [],
 	};
 }
@@ -148,6 +159,7 @@ function createWorkspaceEntry(workspacePath: string): WorkspaceMetadataEntry {
 			stateToken: null,
 			stateVersion: 0,
 		},
+		homeRepositoryUrl: null,
 		taskMetadataByTaskId: new Map<string, CachedTaskWorkspaceMetadata>(),
 	};
 }
@@ -156,10 +168,20 @@ function buildWorkspaceMetadataSnapshot(entry: WorkspaceMetadataEntry): RuntimeW
 	return {
 		homeGitSummary: entry.homeGit.summary,
 		homeGitStateVersion: entry.homeGit.stateVersion,
+		homeRepositoryUrl: entry.homeRepositoryUrl,
 		taskWorkspaces: entry.trackedTasks
 			.map((task) => entry.taskMetadataByTaskId.get(task.taskId)?.data ?? null)
 			.filter((task): task is RuntimeTaskWorkspaceMetadata => task !== null),
 	};
+}
+
+async function loadHomeRepositoryUrl(workspacePath: string): Promise<string | null> {
+	const result = await runGit(workspacePath, ["config", "--get", "remote.origin.url"]);
+	if (!result.ok) {
+		return null;
+	}
+	const normalized = result.stdout.trim();
+	return normalized.length > 0 ? normalized : null;
 }
 
 async function loadHomeGitMetadata(entry: WorkspaceMetadataEntry): Promise<CachedHomeGitMetadata> {
@@ -211,6 +233,11 @@ async function loadTaskWorkspaceMetadata(
 				changedFiles: null,
 				additions: null,
 				deletions: null,
+				upstreamBranch: null,
+				aheadCount: null,
+				behindCount: null,
+				isMergedIntoBaseBranch: null,
+				isMergedIntoRemoteBaseBranch: null,
 				stateVersion: Date.now(),
 			},
 			stateToken: null,
@@ -219,15 +246,30 @@ async function loadTaskWorkspaceMetadata(
 
 	try {
 		const probe = await probeGitWorkspaceState(pathInfo.path);
+		const [baseRefCommit, remoteBaseRefCommit] = await Promise.all([
+			readCommitForRef(pathInfo.path, `refs/heads/${pathInfo.baseRef}`),
+			readCommitForRef(pathInfo.path, `refs/remotes/origin/${pathInfo.baseRef}`),
+		]);
+		const metadataStateToken = [
+			probe.stateToken,
+			baseRefCommit ?? "missing-local-base-ref",
+			remoteBaseRefCommit ?? "missing-remote-base-ref",
+		].join("\n--\n");
 		if (
 			current &&
-			current.stateToken === probe.stateToken &&
+			current.stateToken === metadataStateToken &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef
 		) {
 			return current;
 		}
 		const summary = await getGitSyncSummary(pathInfo.path, { probe });
+		const [isMergedIntoBaseBranch, isMergedIntoRemoteBaseBranch] = probe.headCommit
+			? await Promise.all([
+					isCommitMergedIntoRef(pathInfo.path, probe.headCommit, `refs/heads/${pathInfo.baseRef}`),
+					isCommitMergedIntoRef(pathInfo.path, probe.headCommit, `refs/remotes/origin/${pathInfo.baseRef}`),
+				])
+			: [null, null];
 		return {
 			data: {
 				taskId: task.taskId,
@@ -240,9 +282,14 @@ async function loadTaskWorkspaceMetadata(
 				changedFiles: summary.changedFiles,
 				additions: summary.additions,
 				deletions: summary.deletions,
+				upstreamBranch: summary.upstreamBranch,
+				aheadCount: summary.aheadCount,
+				behindCount: summary.behindCount,
+				isMergedIntoBaseBranch,
+				isMergedIntoRemoteBaseBranch,
 				stateVersion: Date.now(),
 			},
-			stateToken: probe.stateToken,
+			stateToken: metadataStateToken,
 		};
 	} catch {
 		if (current) {
@@ -260,11 +307,39 @@ async function loadTaskWorkspaceMetadata(
 				changedFiles: null,
 				additions: null,
 				deletions: null,
+				upstreamBranch: null,
+				aheadCount: null,
+				behindCount: null,
+				isMergedIntoBaseBranch: null,
+				isMergedIntoRemoteBaseBranch: null,
 				stateVersion: Date.now(),
 			},
 			stateToken: null,
 		};
 	}
+}
+
+async function readCommitForRef(cwd: string, ref: string): Promise<string | null> {
+	const result = await runGit(cwd, ["rev-parse", "--verify", "--quiet", ref]);
+	if (!result.ok || !result.stdout) {
+		return null;
+	}
+	return result.stdout;
+}
+
+async function isCommitMergedIntoRef(cwd: string, commit: string, ref: string): Promise<boolean | null> {
+	const refCommit = await readCommitForRef(cwd, ref);
+	if (!refCommit) {
+		return null;
+	}
+	const result = await runGit(cwd, ["merge-base", "--is-ancestor", commit, refCommit]);
+	if (result.ok) {
+		return true;
+	}
+	if (result.exitCode === 1) {
+		return false;
+	}
+	return null;
 }
 
 export function createWorkspaceMetadataMonitor(
@@ -292,6 +367,7 @@ export function createWorkspaceMetadataMonitor(
 		entry.refreshPromise = (async () => {
 			const previousSnapshot = buildWorkspaceMetadataSnapshot(entry);
 			entry.homeGit = await loadHomeGitMetadata(entry);
+			entry.homeRepositoryUrl = await loadHomeRepositoryUrl(entry.workspacePath);
 
 			const nextTaskEntries = await Promise.all(
 				entry.trackedTasks.map(async (task) => {

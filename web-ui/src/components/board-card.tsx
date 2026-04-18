@@ -10,11 +10,12 @@ import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
-import type { BoardCard as BoardCardModel, BoardColumnId } from "@/types";
+import { useHomeRepositoryUrlValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
+import type { BoardCard as BoardCardModel, BoardColumnId, ReviewTaskWorkspaceSnapshot } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
-import { useMeasure } from "@/utils/react-use";
+import { useInterval, useMeasure } from "@/utils/react-use";
+import { formatSessionElapsedDuration } from "@/utils/session-timer";
 import {
 	clampTextWithInlineSuffix,
 	splitPromptToTitleDescriptionByWidth,
@@ -25,6 +26,15 @@ import { DEFAULT_TEXT_MEASURE_FONT, measureTextWidth, readElementFontShorthand }
 interface CardSessionActivity {
 	dotColor: string;
 	text: string;
+}
+
+type CardStatusTagTone = "neutral" | "success" | "warning" | "danger" | "muted";
+
+interface CardStatusTag {
+	key: string;
+	label: string;
+	tone: CardStatusTagTone;
+	href?: string;
 }
 
 const SESSION_ACTIVITY_COLOR = {
@@ -41,6 +51,13 @@ const SESSION_PREVIEW_COLLAPSE_LINES = 6;
 const DESCRIPTION_EXPAND_LABEL = "See more";
 const DESCRIPTION_COLLAPSE_LABEL = "Less";
 const DESCRIPTION_COLLAPSE_SUFFIX = `… ${DESCRIPTION_EXPAND_LABEL}`;
+const COMPLETED_CARD_STATUS_TAG_CLASS_BY_TONE: Record<CardStatusTagTone, string> = {
+	neutral: "border-border text-text-secondary bg-surface-1",
+	success: "border-status-green/30 text-status-green bg-status-green/10",
+	warning: "border-status-gold/35 text-status-gold bg-status-gold/10",
+	danger: "border-status-red/30 text-status-red bg-status-red/10",
+	muted: "border-border text-text-tertiary bg-surface-1",
+};
 
 function reconstructTaskWorktreeDisplayPath(taskId: string, workspacePath: string | null | undefined): string | null {
 	if (!workspacePath) {
@@ -187,6 +204,240 @@ function getCardSessionActivity(summary: RuntimeTaskSessionSummary | undefined):
 	return null;
 }
 
+function isCardAwaitingUserInput(summary: RuntimeTaskSessionSummary | undefined): boolean {
+	const activityText = summary?.latestHookActivity?.activityText?.trim() ?? "";
+	return activityText.startsWith("Waiting for approval");
+}
+
+function getCompletedCardStatusTags(snapshot: ReviewTaskWorkspaceSnapshot | null | undefined): CardStatusTag[] {
+	if (!snapshot) {
+		return [];
+	}
+
+	const tags: CardStatusTag[] = [];
+	const changedFiles = snapshot.changedFiles;
+	if (changedFiles === null || changedFiles === undefined) {
+		tags.push({ key: "worktree", label: "Worktree unknown", tone: "muted" });
+	} else if (changedFiles === 0) {
+		tags.push({ key: "worktree", label: "Worktree clean", tone: "success" });
+	} else {
+		tags.push({
+			key: "worktree",
+			label: `Worktree ${changedFiles} ${changedFiles === 1 ? "change" : "changes"}`,
+			tone: "warning",
+		});
+	}
+
+	if (snapshot.branch) {
+		tags.push({ key: "branch", label: `Branch ${snapshot.branch}`, tone: "neutral" });
+	} else if (snapshot.isDetached) {
+		tags.push({ key: "branch", label: "Branch detached", tone: "warning" });
+	} else {
+		tags.push({ key: "branch", label: "Branch unknown", tone: "muted" });
+	}
+
+	const upstreamBranch = snapshot.upstreamBranch ?? null;
+	const aheadCount = snapshot.aheadCount ?? null;
+	const behindCount = snapshot.behindCount ?? null;
+	if (!upstreamBranch) {
+		tags.push({ key: "remote-sync", label: "Remote no-upstream", tone: "muted" });
+	} else if (aheadCount === null || behindCount === null) {
+		tags.push({ key: "remote-sync", label: "Remote sync unknown", tone: "muted" });
+	} else if (aheadCount === 0 && behindCount === 0) {
+		tags.push({ key: "remote-sync", label: "Remote synced", tone: "success" });
+	} else if (aheadCount > 0 && behindCount === 0) {
+		tags.push({ key: "remote-sync", label: `Remote ahead ${aheadCount}`, tone: "warning" });
+	} else if (aheadCount === 0 && behindCount > 0) {
+		tags.push({ key: "remote-sync", label: `Remote behind ${behindCount}`, tone: "warning" });
+	} else {
+		tags.push({ key: "remote-sync", label: `Remote diverged +${aheadCount}/-${behindCount}`, tone: "danger" });
+	}
+
+	const baseRefLabel = snapshot.baseRef?.trim() || "base";
+	const localMergeStatus = snapshot.isMergedIntoBaseBranch;
+	const remoteMergeStatus = snapshot.isMergedIntoRemoteBaseBranch;
+	tags.push({
+		key: "base-local",
+		label:
+			localMergeStatus === true
+				? `${baseRefLabel} merged (local)`
+				: localMergeStatus === false
+					? `${baseRefLabel} not merged (local)`
+					: `${baseRefLabel} merge unknown (local)`,
+		tone: localMergeStatus === true ? "success" : localMergeStatus === false ? "warning" : "muted",
+	});
+	tags.push({
+		key: "base-remote",
+		label:
+			remoteMergeStatus === true
+				? `${baseRefLabel} merged (remote)`
+				: remoteMergeStatus === false
+					? `${baseRefLabel} not merged (remote)`
+					: `${baseRefLabel} merge unknown (remote)`,
+		tone: remoteMergeStatus === true ? "success" : remoteMergeStatus === false ? "warning" : "muted",
+	});
+
+	return tags;
+}
+
+const GITHUB_RELEASE_URL_PATTERN = /https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/releases\/[^\s)>"']+/gi;
+const SEMVER_PATTERN = /\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/g;
+const githubReleaseLookupCache = new Map<string, Promise<string | null>>();
+
+function normalizeGithubReleaseUrlCandidate(value: string): string | null {
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return null;
+	}
+	try {
+		const parsed = new URL(trimmed);
+		if (parsed.hostname !== "github.com") {
+			return null;
+		}
+		const path = parsed.pathname.replace(/\/+$/g, "");
+		const segments = path.split("/").filter((segment) => segment.length > 0);
+		if (segments.length < 4) {
+			return null;
+		}
+		if (segments[2] !== "releases") {
+			return null;
+		}
+		if (segments[3] !== "tag" && segments[3] !== "latest") {
+			return null;
+		}
+		return `${parsed.origin}${path}`;
+	} catch {
+		return null;
+	}
+}
+
+function extractGithubReleaseUrlFromText(value: string | null | undefined): string | null {
+	if (!value) {
+		return null;
+	}
+	const matches = value.match(GITHUB_RELEASE_URL_PATTERN);
+	if (!matches || matches.length === 0) {
+		return null;
+	}
+	for (const match of matches) {
+		const normalized = normalizeGithubReleaseUrlCandidate(match);
+		if (normalized) {
+			return normalized;
+		}
+	}
+	return null;
+}
+
+function findTaskReleaseUrl(sessionSummary: RuntimeTaskSessionSummary | undefined): string | null {
+	if (!sessionSummary) {
+		return null;
+	}
+	const activity = sessionSummary.latestHookActivity;
+	return (
+		extractGithubReleaseUrlFromText(activity?.finalMessage) ??
+		extractGithubReleaseUrlFromText(activity?.activityText) ??
+		extractGithubReleaseUrlFromText(activity?.toolInputSummary) ??
+		extractGithubReleaseUrlFromText(sessionSummary.warningMessage)
+	);
+}
+
+function extractVersionFromText(value: string | null | undefined): string | null {
+	if (!value) {
+		return null;
+	}
+	SEMVER_PATTERN.lastIndex = 0;
+	let match = SEMVER_PATTERN.exec(value);
+	while (match !== null) {
+		const version = match[1]?.trim();
+		if (version) {
+			return version;
+		}
+		match = SEMVER_PATTERN.exec(value);
+	}
+	return null;
+}
+
+function findVersionHint(cardPrompt: string, sessionSummary: RuntimeTaskSessionSummary | undefined): string | null {
+	const activity = sessionSummary?.latestHookActivity;
+	return (
+		extractVersionFromText(activity?.finalMessage) ??
+		extractVersionFromText(activity?.activityText) ??
+		extractVersionFromText(activity?.toolInputSummary) ??
+		extractVersionFromText(sessionSummary?.warningMessage) ??
+		extractVersionFromText(cardPrompt)
+	);
+}
+
+function parseGithubRepoFromRemoteUrl(remoteUrl: string | null | undefined): { owner: string; repo: string } | null {
+	if (!remoteUrl) {
+		return null;
+	}
+	const normalized = remoteUrl.trim();
+	if (!normalized) {
+		return null;
+	}
+	const sshMatch = normalized.match(/^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
+	if (sshMatch?.[1] && sshMatch[2]) {
+		return { owner: sshMatch[1], repo: sshMatch[2] };
+	}
+	try {
+		const parsed = new URL(normalized);
+		if (parsed.hostname !== "github.com") {
+			return null;
+		}
+		const parts = parsed.pathname
+			.replace(/\.git$/i, "")
+			.split("/")
+			.filter((part) => part.length > 0);
+		if (parts.length < 2) {
+			return null;
+		}
+		return { owner: parts[0] as string, repo: parts[1] as string };
+	} catch {
+		return null;
+	}
+}
+
+async function checkGithubReleaseByTag(owner: string, repo: string, tag: string): Promise<string | null> {
+	const response = await fetch(
+		`https://api.github.com/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`,
+	);
+	if (!response.ok) {
+		return null;
+	}
+	const payload = (await response.json()) as { html_url?: unknown };
+	return typeof payload.html_url === "string" ? payload.html_url : null;
+}
+
+function getGithubReleaseUrlFromVersionHint(
+	remoteUrl: string | null | undefined,
+	versionHint: string | null | undefined,
+): Promise<string | null> {
+	const repo = parseGithubRepoFromRemoteUrl(remoteUrl);
+	const version = versionHint?.trim() ?? "";
+	if (!repo || !version) {
+		return Promise.resolve(null);
+	}
+	const normalizedVersion = version.startsWith("v") ? version.slice(1) : version;
+	const candidateTags = new Set<string>([normalizedVersion, `v${normalizedVersion}`]);
+	const cacheKey = `${repo.owner}/${repo.repo}:${Array.from(candidateTags).sort().join(",")}`;
+	const cached = githubReleaseLookupCache.get(cacheKey);
+	if (cached) {
+		return cached;
+	}
+	const lookup = (async () => {
+		for (const tag of candidateTags) {
+			const found = await checkGithubReleaseByTag(repo.owner, repo.repo, tag);
+			if (found) {
+				return found;
+			}
+		}
+		return null;
+	})();
+	githubReleaseLookupCache.set(cacheKey, lookup);
+	return lookup;
+}
+
 export function BoardCard({
 	card,
 	index,
@@ -247,7 +498,11 @@ export function BoardCard({
 	const [sessionPreviewFont, setSessionPreviewFont] = useState(DEFAULT_TEXT_MEASURE_FONT);
 	const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
 	const [isSessionPreviewExpanded, setIsSessionPreviewExpanded] = useState(false);
+	const [isTrashHistoryExpanded, setIsTrashHistoryExpanded] = useState(false);
+	const [verifiedReleaseUrl, setVerifiedReleaseUrl] = useState<string | null>(null);
+	const [nowMs, setNowMs] = useState(() => Date.now());
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
+	const homeRepositoryUrl = useHomeRepositoryUrlValue();
 	const isTrashCard = columnId === "trash";
 	const isCardInteractive = !isTrashCard;
 	const titleWidth = titleRect.width > 0 ? titleRect.width : titleWidthFallback;
@@ -257,6 +512,7 @@ export function BoardCard({
 		return card.prompt.trim();
 	}, [card.prompt]);
 	const rawSessionActivity = useMemo(() => getCardSessionActivity(sessionSummary), [sessionSummary]);
+	const isAwaitingUserInput = useMemo(() => isCardAwaitingUserInput(sessionSummary), [sessionSummary]);
 	const lastSessionActivityRef = useRef<CardSessionActivity | null>(null);
 	const lastSessionActivityCardIdRef = useRef<string | null>(null);
 	if (lastSessionActivityCardIdRef.current !== card.id) {
@@ -341,6 +597,24 @@ export function BoardCard({
 		setIsSessionPreviewExpanded(false);
 	}, [card.id, sessionActivity?.text]);
 
+	useEffect(() => {
+		setIsTrashHistoryExpanded(false);
+	}, [card.id]);
+
+	const sessionTimerStartedAt = sessionSummary?.startedAt ?? null;
+	const isSessionTimerRunning = sessionSummary?.state === "running" && sessionTimerStartedAt !== null;
+
+	useEffect(() => {
+		setNowMs(Date.now());
+	}, [card.id, sessionSummary?.state, sessionTimerStartedAt, sessionSummary?.updatedAt]);
+
+	useInterval(
+		() => {
+			setNowMs(Date.now());
+		},
+		isSessionTimerRunning ? 1_000 : null,
+	);
+
 	const stopEvent = (event: MouseEvent<HTMLElement>) => {
 		event.preventDefault();
 		event.stopPropagation();
@@ -421,6 +695,59 @@ export function BoardCard({
 	const isAnyGitActionLoading = isCommitLoading || isOpenPrLoading;
 	const cancelAutomaticActionLabel =
 		!isTrashCard && card.autoReviewEnabled ? getTaskAutoReviewCancelButtonLabel(card.autoReviewMode) : null;
+	const sessionTimerDurationMs =
+		sessionTimerStartedAt === null
+			? null
+			: Math.max(0, (isSessionTimerRunning ? nowMs : (sessionSummary?.updatedAt ?? nowMs)) - sessionTimerStartedAt);
+	const sessionTimerLabel =
+		sessionTimerDurationMs === null ? null : formatSessionElapsedDuration(sessionTimerDurationMs);
+	const explicitReleaseUrl = useMemo(() => findTaskReleaseUrl(sessionSummary), [sessionSummary]);
+	const versionHint = useMemo(() => findVersionHint(card.prompt, sessionSummary), [card.prompt, sessionSummary]);
+	useEffect(() => {
+		let cancelled = false;
+		if (!isTrashCard || explicitReleaseUrl) {
+			setVerifiedReleaseUrl(null);
+			return;
+		}
+		if (!versionHint || !homeRepositoryUrl) {
+			setVerifiedReleaseUrl(null);
+			return;
+		}
+		void getGithubReleaseUrlFromVersionHint(homeRepositoryUrl, versionHint).then((resolved) => {
+			if (cancelled) {
+				return;
+			}
+			setVerifiedReleaseUrl(resolved);
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [explicitReleaseUrl, homeRepositoryUrl, isTrashCard, versionHint]);
+	const completionStatusTags = useMemo(() => {
+		if (columnId !== "review" && !isTrashCard) {
+			return [];
+		}
+		const tags = getCompletedCardStatusTags(reviewWorkspaceSnapshot);
+		if (!isTrashCard) {
+			return tags;
+		}
+		const releaseUrl = explicitReleaseUrl ?? verifiedReleaseUrl;
+		if (!releaseUrl) {
+			return tags;
+		}
+		const releaseTag: CardStatusTag = {
+			key: "github-release",
+			label: "GitHub Release",
+			tone: "success",
+			href: releaseUrl,
+		};
+		return [releaseTag, ...tags];
+	}, [columnId, explicitReleaseUrl, isTrashCard, reviewWorkspaceSnapshot, verifiedReleaseUrl]);
+	const visibleActivityLogEntries = useMemo(
+		() =>
+			(sessionSummary?.activityLog ?? []).filter((entry) => entry.status === "success" || entry.status === "error"),
+		[sessionSummary?.activityLog],
+	);
 
 	return (
 		<Draggable draggableId={card.id} index={index} isDragDisabled={false}>
@@ -456,6 +783,11 @@ export function BoardCard({
 							onDependencyPointerDown?.(card.id, event);
 						}}
 						onClick={(event) => {
+							if (isTrashCard) {
+								stopEvent(event);
+								setIsTrashHistoryExpanded((previous) => !previous);
+								return;
+							}
 							if (!isCardInteractive) {
 								return;
 							}
@@ -511,6 +843,17 @@ export function BoardCard({
 										{displayPromptSplit.title}
 									</p>
 								</div>
+								{sessionTimerLabel ? (
+									<span
+										className="shrink-0 rounded-sm border border-border bg-surface-1 px-1.5 py-0.5 font-mono text-[11px] leading-none text-text-secondary"
+										title={`Elapsed time ${sessionTimerLabel}`}
+									>
+										{sessionTimerLabel}
+									</span>
+								) : null}
+								{isAwaitingUserInput ? (
+									<span className="kb-board-card-input-blinker" title="Waiting for user input" />
+								) : null}
 								{columnId === "backlog" ? (
 									<Button
 										icon={<Play size={14} />}
@@ -617,6 +960,38 @@ export function BoardCard({
 									</p>
 								</div>
 							) : null}
+							{completionStatusTags.length > 0 ? (
+								<div className="mt-1.5 flex flex-wrap gap-1">
+									{completionStatusTags.map((tag) =>
+										tag.href ? (
+											<a
+												key={tag.key}
+												href={tag.href}
+												target="_blank"
+												rel="noreferrer"
+												onMouseDown={stopEvent}
+												onClick={stopEvent}
+												className={cn(
+													"inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[11px] leading-none underline-offset-2 hover:underline",
+													COMPLETED_CARD_STATUS_TAG_CLASS_BY_TONE[tag.tone],
+												)}
+											>
+												{tag.label}
+											</a>
+										) : (
+											<span
+												key={tag.key}
+												className={cn(
+													"inline-flex items-center rounded-sm border px-1.5 py-0.5 text-[11px] leading-none",
+													COMPLETED_CARD_STATUS_TAG_CLASS_BY_TONE[tag.tone],
+												)}
+											>
+												{tag.label}
+											</span>
+										),
+									)}
+								</div>
+							) : null}
 							{sessionActivity ? (
 								<div
 									className="flex gap-1.5 items-start mt-[6px]"
@@ -688,6 +1063,26 @@ export function BoardCard({
 											) : null}
 										</p>
 									</div>
+								</div>
+							) : null}
+							{isTrashCard && isTrashHistoryExpanded && visibleActivityLogEntries.length > 0 ? (
+								<div className="mt-2 rounded-md border border-border bg-surface-1 p-2">
+									<p className="m-0 text-[11px] font-semibold uppercase tracking-wide text-text-tertiary">
+										Task History
+									</p>
+									<ul className="mt-1.5 space-y-1.5 pl-4">
+										{visibleActivityLogEntries.map((entry) => (
+											<li
+												key={entry.id}
+												className={cn(
+													"text-[12px] leading-[1.35] list-disc",
+													entry.status === "error" ? "text-status-red" : "text-text-secondary",
+												)}
+											>
+												{entry.text}
+											</li>
+										))}
+									</ul>
 								</div>
 							) : null}
 							{showWorkspaceStatus && reviewWorkspacePath ? (

@@ -9,6 +9,7 @@ import {
 	CircleArrowDown,
 	Command,
 	GitBranch,
+	History,
 	Play,
 	Plus,
 	Settings,
@@ -39,6 +40,12 @@ import { isMacPlatform } from "@/utils/platform";
 
 type SettingsSection = "shortcuts";
 type CreateShortcutResult = { ok: boolean; message?: string };
+export interface TopBarHistoryItem {
+	taskId: string;
+	prompt: string;
+	updatedAt: number;
+	hasError: boolean;
+}
 
 function getWorkspacePathSegments(path: string): string[] {
 	return path
@@ -307,6 +314,7 @@ export function TopBar({
 	onOpenWorkspace,
 	canOpenWorkspace,
 	isOpeningWorkspace,
+	historyItems,
 	hideProjectDependentActions = false,
 }: {
 	onBack?: () => void;
@@ -341,6 +349,7 @@ export function TopBar({
 	onOpenWorkspace: () => void;
 	canOpenWorkspace: boolean;
 	isOpeningWorkspace: boolean;
+	historyItems?: TopBarHistoryItem[];
 	hideProjectDependentActions?: boolean;
 }): React.ReactElement {
 	const displayWorkspacePath = workspacePath ? formatPathForDisplay(workspacePath) : null;
@@ -362,6 +371,7 @@ export function TopBar({
 	const [newShortcutIcon, setNewShortcutIcon] = useState<RuntimeShortcutPickerIconId>("play");
 	const [newShortcutLabel, setNewShortcutLabel] = useState("Run");
 	const [newShortcutCommand, setNewShortcutCommand] = useState("");
+	const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
 	const canSaveNewShortcut = newShortcutCommand.trim().length > 0;
 	const handleOpenCreateShortcutDialog = () => {
 		setCreateShortcutError(null);
@@ -485,6 +495,18 @@ export function TopBar({
 					) : null}
 				</div>
 				<div className="flex flex-nowrap items-center h-10 pr-0.5 shrink-0">
+					{!hideProjectDependentActions ? (
+						<Button
+							variant="ghost"
+							size="sm"
+							icon={<History size={14} />}
+							onClick={() => setIsHistoryDialogOpen(true)}
+							className="mr-2"
+							aria-label="Open repository task history"
+						>
+							History
+						</Button>
+					) : null}
 					{!hideProjectDependentActions && onRunShortcut ? (
 						selectedShortcut ? (
 							<div className="flex">
@@ -611,6 +633,44 @@ export function TopBar({
 					/>
 				</div>
 			</nav>
+			<Dialog
+				open={isHistoryDialogOpen}
+				onOpenChange={setIsHistoryDialogOpen}
+				contentClassName="max-w-2xl"
+				contentAriaDescribedBy={undefined}
+			>
+				<DialogHeader title="Repository Task History" icon={<History size={16} />} />
+				<DialogBody>
+					{(historyItems ?? []).length === 0 ? (
+						<p className="m-0 text-[13px] text-text-secondary">No completed tasks in trash yet.</p>
+					) : (
+						<ul className="m-0 max-h-[420px] space-y-2 overflow-y-auto p-0">
+							{(historyItems ?? []).map((item) => (
+								<li
+									key={item.taskId}
+									className="list-none rounded-md border border-border bg-surface-2 px-2.5 py-2"
+								>
+									<p className="m-0 text-[12px] text-text-secondary">
+										{new Date(item.updatedAt).toLocaleString()}
+									</p>
+									<p className="m-0 mt-0.5 text-[13px] text-text-primary">{item.prompt}</p>
+									<p
+										className={cn(
+											"m-0 mt-1 text-[12px]",
+											item.hasError ? "text-status-red" : "text-status-green",
+										)}
+									>
+										{item.hasError ? "Completed with errors" : "Completed successfully"}
+									</p>
+								</li>
+							))}
+						</ul>
+					)}
+				</DialogBody>
+				<DialogFooter>
+					<Button onClick={() => setIsHistoryDialogOpen(false)}>Close</Button>
+				</DialogFooter>
+			</Dialog>
 			<Dialog
 				open={isCreateShortcutDialogOpen}
 				contentAriaDescribedBy={undefined}

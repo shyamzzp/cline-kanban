@@ -69,12 +69,18 @@ export interface BoardData {
 export interface ReviewTaskWorkspaceSnapshot {
 	taskId: string;
 	path: string;
+	baseRef?: string;
 	branch: string | null;
 	isDetached: boolean;
 	headCommit: string | null;
 	changedFiles: number | null;
 	additions: number | null;
 	deletions: number | null;
+	upstreamBranch?: string | null;
+	aheadCount?: number | null;
+	behindCount?: number | null;
+	isMergedIntoBaseBranch?: boolean | null;
+	isMergedIntoRemoteBaseBranch?: boolean | null;
 }
 
 export interface CardSelection {
