@@ -3,6 +3,7 @@ import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-se
 import type {
 	RuntimeGitCheckoutResponse,
 	RuntimeGitDiscardResponse,
+	RuntimeGithubReleaseResolveResponse,
 	RuntimeGitSummaryResponse,
 	RuntimeGitSyncAction,
 	RuntimeGitSyncResponse,
@@ -26,6 +27,7 @@ import {
 } from "../workspace/get-workspace-changes";
 import { getCommitDiff, getGitLog, getGitRefs } from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
+import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
 import {
 	deleteTaskWorktree,
@@ -194,6 +196,68 @@ function isMissingTaskWorktreeError(error: unknown): boolean {
 		return false;
 	}
 	return error.message.startsWith("Task worktree not found for task ");
+}
+
+function parseGithubRepoFromRemoteUrl(remoteUrl: string | null | undefined): { owner: string; repo: string } | null {
+	if (!remoteUrl) {
+		return null;
+	}
+	const normalized = remoteUrl.trim();
+	if (!normalized) {
+		return null;
+	}
+	const sshMatch = normalized.match(/^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
+	if (sshMatch?.[1] && sshMatch[2]) {
+		return { owner: sshMatch[1], repo: sshMatch[2] };
+	}
+	try {
+		const parsed = new URL(normalized);
+		if (parsed.hostname !== "github.com") {
+			return null;
+		}
+		const parts = parsed.pathname
+			.replace(/\.git$/i, "")
+			.split("/")
+			.filter((part) => part.length > 0);
+		if (parts.length < 2) {
+			return null;
+		}
+		return { owner: parts[0] as string, repo: parts[1] as string };
+	} catch {
+		return null;
+	}
+}
+
+async function resolveGitHubReleaseUrlFromVersion(
+	repoPath: string,
+	versionHint: string,
+): Promise<RuntimeGithubReleaseResolveResponse> {
+	const remote = await runGit(repoPath, ["config", "--get", "remote.origin.url"]);
+	if (!remote.ok) {
+		return { url: null };
+	}
+	const repo = parseGithubRepoFromRemoteUrl(remote.stdout);
+	if (!repo) {
+		return { url: null };
+	}
+	const normalizedVersion = versionHint.trim().replace(/^v/i, "");
+	if (!normalizedVersion) {
+		return { url: null };
+	}
+	const tags = [normalizedVersion, `v${normalizedVersion}`];
+	for (const tag of tags) {
+		const response = await fetch(
+			`https://api.github.com/repos/${repo.owner}/${repo.repo}/releases/tags/${encodeURIComponent(tag)}`,
+		);
+		if (!response.ok) {
+			continue;
+		}
+		const payload = (await response.json()) as { html_url?: unknown };
+		if (typeof payload.html_url === "string") {
+			return { url: payload.html_url };
+		}
+	}
+	return { url: null };
 }
 
 export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): RuntimeTrpcContext["workspaceApi"] {
@@ -436,6 +500,13 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				cwd: diffCwd,
 				commitHash: input.commitHash,
 			});
+		},
+		resolveGithubReleaseUrl: async (workspaceScope, input) => {
+			try {
+				return await resolveGitHubReleaseUrlFromVersion(workspaceScope.workspacePath, input.versionHint);
+			} catch {
+				return { url: null };
+			}
 		},
 	};
 }

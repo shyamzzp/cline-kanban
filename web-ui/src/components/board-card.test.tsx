@@ -11,6 +11,7 @@ import type { ReviewTaskWorkspaceSnapshot } from "@/types";
 let mockWorkspaceSnapshot: ReviewTaskWorkspaceSnapshot | undefined;
 let mockMeasureWidths = [240, 240, 240];
 let mockMeasureCallCount = 0;
+const resolveGithubReleaseUrlQueryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@hello-pangea/dnd", () => ({
 	Draggable: ({
@@ -31,7 +32,16 @@ vi.mock("@hello-pangea/dnd", () => ({
 
 vi.mock("@/stores/workspace-metadata-store", () => ({
 	useTaskWorkspaceSnapshotValue: () => mockWorkspaceSnapshot,
-	useHomeRepositoryUrlValue: () => "https://github.com/acme/kanban.git",
+}));
+
+vi.mock("@/runtime/trpc-client", () => ({
+	getRuntimeTrpcClient: () => ({
+		workspace: {
+			resolveGithubReleaseUrl: {
+				query: resolveGithubReleaseUrlQueryMock,
+			},
+		},
+	}),
 }));
 
 vi.mock("@/utils/react-use", async () => {
@@ -149,6 +159,7 @@ describe("BoardCard", () => {
 		mockWorkspaceSnapshot = undefined;
 		mockMeasureWidths = [240, 240, 240];
 		mockMeasureCallCount = 0;
+		resolveGithubReleaseUrlQueryMock.mockReset();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -338,11 +349,10 @@ describe("BoardCard", () => {
 	});
 
 	it("verifies and shows a GitHub release label from a version hint", async () => {
-		const fetchMock = vi.fn(async () => ({
-			ok: true,
-			json: async () => ({ html_url: "https://github.com/acme/kanban/releases/tag/v1.0.1" }),
-		}));
-		vi.stubGlobal("fetch", fetchMock);
+		resolveGithubReleaseUrlQueryMock.mockResolvedValue({
+			url: "https://github.com/acme/kanban/releases/tag/v1.0.1",
+		});
+		window.history.replaceState({}, "", "/cline-kanban");
 
 		await act(async () => {
 			root.render(
@@ -373,7 +383,7 @@ describe("BoardCard", () => {
 			await Promise.resolve();
 		});
 
-		expect(fetchMock).toHaveBeenCalled();
+		expect(resolveGithubReleaseUrlQueryMock).toHaveBeenCalledWith({ versionHint: "1.0.1" });
 		const releaseLabel = container.querySelector('a[href="https://github.com/acme/kanban/releases/tag/v1.0.1"]');
 		expect(releaseLabel).toBeInstanceOf(HTMLAnchorElement);
 		expect(releaseLabel?.textContent).toBe("GitHub Release");

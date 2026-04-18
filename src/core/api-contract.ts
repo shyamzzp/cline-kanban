@@ -58,6 +58,16 @@ export const runtimeWorkspaceFileSearchResponseSchema = z.object({
 });
 export type RuntimeWorkspaceFileSearchResponse = z.infer<typeof runtimeWorkspaceFileSearchResponseSchema>;
 
+export const runtimeGithubReleaseResolveRequestSchema = z.object({
+	versionHint: z.string(),
+});
+export type RuntimeGithubReleaseResolveRequest = z.infer<typeof runtimeGithubReleaseResolveRequestSchema>;
+
+export const runtimeGithubReleaseResolveResponseSchema = z.object({
+	url: z.string().nullable(),
+});
+export type RuntimeGithubReleaseResolveResponse = z.infer<typeof runtimeGithubReleaseResolveResponseSchema>;
+
 export const runtimeSlashCommandSchema = z.object({
 	name: z.string(),
 	instructions: z.string(),

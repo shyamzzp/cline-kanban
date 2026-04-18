@@ -9,8 +9,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { parseProjectIdFromPathname } from "@/hooks/app-utils";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import { useHomeRepositoryUrlValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
+import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { BoardCard as BoardCardModel, BoardColumnId, ReviewTaskWorkspaceSnapshot } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import { formatPathForDisplay } from "@/utils/path-display";
@@ -368,71 +370,24 @@ function findVersionHint(cardPrompt: string, sessionSummary: RuntimeTaskSessionS
 	);
 }
 
-function parseGithubRepoFromRemoteUrl(remoteUrl: string | null | undefined): { owner: string; repo: string } | null {
-	if (!remoteUrl) {
-		return null;
-	}
-	const normalized = remoteUrl.trim();
-	if (!normalized) {
-		return null;
-	}
-	const sshMatch = normalized.match(/^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
-	if (sshMatch?.[1] && sshMatch[2]) {
-		return { owner: sshMatch[1], repo: sshMatch[2] };
-	}
-	try {
-		const parsed = new URL(normalized);
-		if (parsed.hostname !== "github.com") {
-			return null;
-		}
-		const parts = parsed.pathname
-			.replace(/\.git$/i, "")
-			.split("/")
-			.filter((part) => part.length > 0);
-		if (parts.length < 2) {
-			return null;
-		}
-		return { owner: parts[0] as string, repo: parts[1] as string };
-	} catch {
-		return null;
-	}
-}
-
-async function checkGithubReleaseByTag(owner: string, repo: string, tag: string): Promise<string | null> {
-	const response = await fetch(
-		`https://api.github.com/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`,
-	);
-	if (!response.ok) {
-		return null;
-	}
-	const payload = (await response.json()) as { html_url?: unknown };
-	return typeof payload.html_url === "string" ? payload.html_url : null;
-}
-
 function getGithubReleaseUrlFromVersionHint(
-	remoteUrl: string | null | undefined,
+	workspaceId: string | null,
 	versionHint: string | null | undefined,
 ): Promise<string | null> {
-	const repo = parseGithubRepoFromRemoteUrl(remoteUrl);
 	const version = versionHint?.trim() ?? "";
-	if (!repo || !version) {
+	if (!workspaceId || !version) {
 		return Promise.resolve(null);
 	}
 	const normalizedVersion = version.startsWith("v") ? version.slice(1) : version;
-	const candidateTags = new Set<string>([normalizedVersion, `v${normalizedVersion}`]);
-	const cacheKey = `${repo.owner}/${repo.repo}:${Array.from(candidateTags).sort().join(",")}`;
+	const cacheKey = `${workspaceId}:${normalizedVersion}`;
 	const cached = githubReleaseLookupCache.get(cacheKey);
 	if (cached) {
 		return cached;
 	}
 	const lookup = (async () => {
-		for (const tag of candidateTags) {
-			const found = await checkGithubReleaseByTag(repo.owner, repo.repo, tag);
-			if (found) {
-				return found;
-			}
-		}
-		return null;
+		const trpc = getRuntimeTrpcClient(workspaceId);
+		const result = await trpc.workspace.resolveGithubReleaseUrl.query({ versionHint: normalizedVersion });
+		return result.url;
 	})();
 	githubReleaseLookupCache.set(cacheKey, lookup);
 	return lookup;
@@ -502,7 +457,8 @@ export function BoardCard({
 	const [verifiedReleaseUrl, setVerifiedReleaseUrl] = useState<string | null>(null);
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(card.id);
-	const homeRepositoryUrl = useHomeRepositoryUrlValue();
+	const workspaceIdFromPathname =
+		typeof window === "undefined" ? null : parseProjectIdFromPathname(window.location.pathname);
 	const isTrashCard = columnId === "trash";
 	const isCardInteractive = !isTrashCard;
 	const titleWidth = titleRect.width > 0 ? titleRect.width : titleWidthFallback;
@@ -709,11 +665,11 @@ export function BoardCard({
 			setVerifiedReleaseUrl(null);
 			return;
 		}
-		if (!versionHint || !homeRepositoryUrl) {
+		if (!versionHint || !workspaceIdFromPathname) {
 			setVerifiedReleaseUrl(null);
 			return;
 		}
-		void getGithubReleaseUrlFromVersionHint(homeRepositoryUrl, versionHint).then((resolved) => {
+		void getGithubReleaseUrlFromVersionHint(workspaceIdFromPathname, versionHint).then((resolved) => {
 			if (cancelled) {
 				return;
 			}
@@ -722,7 +678,7 @@ export function BoardCard({
 		return () => {
 			cancelled = true;
 		};
-	}, [explicitReleaseUrl, homeRepositoryUrl, isTrashCard, versionHint]);
+	}, [explicitReleaseUrl, isTrashCard, versionHint, workspaceIdFromPathname]);
 	const completionStatusTags = useMemo(() => {
 		if (columnId !== "review" && !isTrashCard) {
 			return [];

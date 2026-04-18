@@ -36,6 +36,8 @@ import type {
 	RuntimeGitCommitDiffRequest,
 	RuntimeGitCommitDiffResponse,
 	RuntimeGitDiscardResponse,
+	RuntimeGithubReleaseResolveRequest,
+	RuntimeGithubReleaseResolveResponse,
 	RuntimeGitLogRequest,
 	RuntimeGitLogResponse,
 	RuntimeGitRefsResponse,
@@ -116,6 +118,8 @@ import {
 	runtimeGitCommitDiffRequestSchema,
 	runtimeGitCommitDiffResponseSchema,
 	runtimeGitDiscardResponseSchema,
+	runtimeGithubReleaseResolveRequestSchema,
+	runtimeGithubReleaseResolveResponseSchema,
 	runtimeGitLogRequestSchema,
 	runtimeGitLogResponseSchema,
 	runtimeGitRefsResponseSchema,
@@ -313,6 +317,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeGitCommitDiffRequest,
 		) => Promise<RuntimeGitCommitDiffResponse>;
+		resolveGithubReleaseUrl: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGithubReleaseResolveRequest,
+		) => Promise<RuntimeGithubReleaseResolveResponse>;
 	};
 	projectsApi: {
 		listProjects: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectsResponse>;
@@ -618,6 +626,12 @@ export const runtimeAppRouter = t.router({
 			.output(runtimeGitCommitDiffResponseSchema)
 			.query(async ({ ctx, input }) => {
 				return await ctx.workspaceApi.loadCommitDiff(ctx.workspaceScope, input);
+			}),
+		resolveGithubReleaseUrl: workspaceProcedure
+			.input(runtimeGithubReleaseResolveRequestSchema)
+			.output(runtimeGithubReleaseResolveResponseSchema)
+			.query(async ({ ctx, input }) => {
+				return await ctx.workspaceApi.resolveGithubReleaseUrl(ctx.workspaceScope, input);
 			}),
 	}),
 	projects: t.router({
